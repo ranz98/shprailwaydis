@@ -50,15 +50,15 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ─── Retry wrapper ───────────────────────────────────────────
-async function retryUpdate(productId, variantUpdates, retries = 3) {
+// ─── Retry wrapper (per variant) ─────────────────────────────
+async function retryVariantUpdate(variantId, compareAtPrice, retries = 3) {
   try {
-    return await updateProductVariants(productId, variantUpdates);
+    return await updateVariantCompareAt(variantId, compareAtPrice);
   } catch (err) {
     if (retries === 0) throw err;
-    console.warn(`⚠️ Retry ${productId}... (${retries})`);
+    console.warn(`⚠️ Retry variant ${variantId}... (${retries} left)`);
     await sleep(1000 * (4 - retries));
-    return retryUpdate(productId, variantUpdates, retries - 1);
+    return retryVariantUpdate(variantId, compareAtPrice, retries - 1);
   }
 }
 
@@ -163,33 +163,31 @@ async function getCollectionProducts(collectionId) {
   return products;
 }
 
-// ─── Bulk update variants ────────────────────────────────────
-const BULK_UPDATE_MUTATION = `
-mutation BulkUpdateVariants($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-    productVariants { id compareAtPrice }
+// ─── Per-variant update mutation ─────────────────────────────
+// Using per-variant updates instead of productVariantsBulkUpdate because
+// Shopify can silently roll back a whole batch if any single variant fails.
+const UPDATE_VARIANT_MUTATION = `
+mutation UpdateVariant($input: ProductVariantInput!) {
+  productVariantUpdate(input: $input) {
+    productVariant { id compareAtPrice }
     userErrors { field message }
   }
 }
 `;
 
-async function updateProductVariants(productId, variantUpdates) {
-  const data = await shopifyGraphQL(BULK_UPDATE_MUTATION, {
-    productId,
-    variants: variantUpdates
+async function updateVariantCompareAt(variantId, compareAtPrice) {
+  const data = await shopifyGraphQL(UPDATE_VARIANT_MUTATION, {
+    input: { id: variantId, compareAtPrice }
   });
 
-  const errors = data.productVariantsBulkUpdate?.userErrors ?? [];
+  const errors = data.productVariantUpdate?.userErrors ?? [];
   if (errors.length) {
-    console.error(`ERROR on ${productId}:`, errors);
+    console.error(`  ❌ variant ${variantId} userErrors:`, errors);
     throw new Error(errors.map(e => e.message).join(", "));
   }
 
-  // Log what Shopify actually stored
-  const updated = data.productVariantsBulkUpdate?.productVariants ?? [];
-  for (const v of updated) {
-    console.log(`  ✔ variant ${v.id} → compareAtPrice=${v.compareAtPrice}`);
-  }
+  const v = data.productVariantUpdate?.productVariant;
+  console.log(`  ✔ variant ${v?.id} → compareAtPrice=${v?.compareAtPrice}`);
   return true;
 }
 
@@ -199,29 +197,23 @@ async function applyDiscountToCollection(collectionId, collectionTitle, pct) {
   const products = await getCollectionProducts(collectionId);
   console.log(`Found ${products.length} products`);
 
-  const CONCURRENCY = 1;  // Sequential to stay within Shopify's 50 pts/sec refill
-  const DELAY = 300;      // ~3 mutations/sec (10 pts each) — safely under the limit
-  let index = 0;
+  const DELAY = 300; // ~3 mutations/sec — safely under Shopify's 50 pts/sec refill
 
-  async function worker() {
-    while (index < products.length) {
-      const product = products[index++];
+  for (const product of products) {
+    console.log(`  Product: "${product.title}" (${product.variants.length} variant(s))`);
+    for (const variant of product.variants) {
+      const price = parseFloat(variant.price);
+      const compareAt = (price / (1 - pct / 100)).toFixed(2);
+      console.log(`    variant ${variant.id}: price=${price} → compareAt=${compareAt}`);
       try {
-        const variantUpdates = product.variants.map(variant => {
-          const price = parseFloat(variant.price);
-          const compareAt = (price / (1 - pct / 100)).toFixed(2);
-          console.log(`  product "${product.title}" variant ${variant.id}: price=${price}, compareAt=${compareAt}`);
-          return { id: variant.id, compareAtPrice: compareAt };
-        });
-        await retryUpdate(product.id, variantUpdates);
+        await updateVariantCompareAt(variant.id, compareAt);
       } catch (err) {
-        console.error(`Failed ${product.title}:`, err.message);
+        console.error(`    Failed variant ${variant.id}:`, err.message);
       }
       await sleep(DELAY);
     }
   }
 
-  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
   console.log(`✅ Done "${collectionTitle}"`);
 }
 
@@ -230,11 +222,15 @@ async function clearDiscountFromCollection(collectionId, collectionTitle) {
   console.log(`Clearing compare_at_price on "${collectionTitle}"...`);
   const products = await getCollectionProducts(collectionId);
   for (const product of products) {
-    const variantsWithCompareAt = product.variants.filter(v => v.compareAtPrice);
-    if (!variantsWithCompareAt.length) continue;
-    const updates = variantsWithCompareAt.map(v => ({ id: v.id, compareAtPrice: null }));
-    await retryUpdate(product.id, updates);
-    await sleep(150);
+    for (const variant of product.variants) {
+      if (!variant.compareAtPrice) continue;
+      try {
+        await updateVariantCompareAt(variant.id, null);
+      } catch (err) {
+        console.error(`    Failed clearing variant ${variant.id}:`, err.message);
+      }
+      await sleep(150);
+    }
   }
 }
 
