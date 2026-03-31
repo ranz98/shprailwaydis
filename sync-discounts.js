@@ -184,6 +184,12 @@ async function updateProductVariants(productId, variantUpdates) {
     console.error(`ERROR on ${productId}:`, errors);
     throw new Error(errors.map(e => e.message).join(", "));
   }
+
+  // Log what Shopify actually stored
+  const updated = data.productVariantsBulkUpdate?.productVariants ?? [];
+  for (const v of updated) {
+    console.log(`  ✔ variant ${v.id} → compareAtPrice=${v.compareAtPrice}`);
+  }
   return true;
 }
 
@@ -204,6 +210,7 @@ async function applyDiscountToCollection(collectionId, collectionTitle, pct) {
         const variantUpdates = product.variants.map(variant => {
           const price = parseFloat(variant.price);
           const compareAt = (price / (1 - pct / 100)).toFixed(2);
+          console.log(`  product "${product.title}" variant ${variant.id}: price=${price}, compareAt=${compareAt}`);
           return { id: variant.id, compareAtPrice: compareAt };
         });
         await retryUpdate(product.id, variantUpdates);
@@ -270,7 +277,10 @@ async function syncDiscounts() {
 
   const allCollections = new Map();
   for (const { node } of allDiscountData.automaticDiscountNodes.edges) {
-    const collections = node.automaticDiscount?.customerGets?.items?.collections?.edges ?? [];
+    // After the DiscountAutomaticBasic fragment fix, customerGets lives inside the typed object
+    const discount = node.automaticDiscount;
+    if (!discount || discount.__typename !== "DiscountAutomaticBasic") continue;
+    const collections = discount.customerGets?.items?.collections?.edges ?? [];
     for (const { node: col } of collections) allCollections.set(col.id, col.title);
   }
 
