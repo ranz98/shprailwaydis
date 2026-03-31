@@ -56,7 +56,10 @@ app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 // ─── Helper ─────────────────────────────────────────────────
 async function runSync(reason) {
   try {
-    console.log(`Running sync (reason: ${reason})...`);
+    console.log(`Delaying sync for 3 seconds (reason: ${reason})...`);
+    // Wait for Shopify to mark the discount as ACTIVE in the API
+    await new Promise(r => setTimeout(r, 3000));
+    console.log(`Running sync...`);
     await syncDiscounts();
   } catch (err) {
     console.error("Sync error:", err.message);
