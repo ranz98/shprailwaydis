@@ -4,8 +4,8 @@ const fetch = require("node-fetch");
 const SHOP  = process.env.SHOP_DOMAIN;
 const TOKEN = process.env.ACCESS_TOKEN;
 
-// ─── GraphQL helper ───────────────────────────────────────────
-async function shopifyGraphQL(query, variables = {}) {
+// ─── GraphQL helper (with throttle handling) ──────────────────
+async function shopifyGraphQL(query, variables = {}, attempt = 0) {
   const res = await fetch(
     `https://${SHOP}/admin/api/2024-01/graphql.json`,
     {
@@ -18,10 +18,30 @@ async function shopifyGraphQL(query, variables = {}) {
     }
   );
 
+  // Handle HTTP-level throttle (429)
+  if (res.status === 429) {
+    const retryAfter = parseInt(res.headers.get("Retry-After") || "2", 10);
+    console.warn(`⏳ HTTP 429 – waiting ${retryAfter}s before retry...`);
+    await sleep(retryAfter * 1000);
+    return shopifyGraphQL(query, variables, attempt + 1);
+  }
+
   if (!res.ok) throw new Error(`Shopify API error: ${res.status} ${res.statusText}`);
 
   const json = await res.json();
-  if (json.errors) throw new Error(`GraphQL errors: ${JSON.stringify(json.errors)}`);
+
+  // Handle GraphQL-level THROTTLED error
+  if (json.errors) {
+    const throttled = json.errors.some(e => e.extensions?.code === "THROTTLED");
+    if (throttled && attempt < 6) {
+      const wait = Math.min(2000 * (attempt + 1), 16000);
+      console.warn(`⏳ GraphQL THROTTLED – waiting ${wait}ms before retry...`);
+      await sleep(wait);
+      return shopifyGraphQL(query, variables, attempt + 1);
+    }
+    throw new Error(`GraphQL errors: ${JSON.stringify(json.errors)}`);
+  }
+
   return json.data;
 }
 
@@ -173,8 +193,8 @@ async function applyDiscountToCollection(collectionId, collectionTitle, pct) {
   const products = await getCollectionProducts(collectionId);
   console.log(`Found ${products.length} products`);
 
-  const CONCURRENCY = 3;
-  const DELAY = 150;
+  const CONCURRENCY = 1;  // Sequential to stay within Shopify's 50 pts/sec refill
+  const DELAY = 300;      // ~3 mutations/sec (10 pts each) — safely under the limit
   let index = 0;
 
   async function worker() {
