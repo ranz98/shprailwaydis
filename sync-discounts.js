@@ -241,6 +241,13 @@ async function applyDiscountToCollection(collectionId, collectionTitle, pct) {
       // 30.999% which some themes truncate to 30%. Ceiling guarantees it's always >= 31%.
       const compareAtFloat = Math.ceil(price / (1 - pct / 100) * 100) / 100;
       const compareAt = compareAtFloat.toFixed(2);
+      
+      // OPTIMIZATION: If the price is already correct, skip the API call
+      if (variant.compareAtPrice === compareAt) {
+        console.log(`    variant ${variant.id}: matches ${compareAt} (skipped)`);
+        continue;
+      }
+
       console.log(`    variant ${variant.id}: price=${price} → compareAt=${compareAt}`);
       try {
         await updateVariantCompareAt(variant.id, compareAt);
