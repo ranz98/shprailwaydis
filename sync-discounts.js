@@ -42,13 +42,14 @@ async function retryUpdate(productId, variantUpdates, retries = 3) {
   }
 }
 
-// ─── Fetch automatic % discounts ─────────────────────────────
+// ─── Fetch automatic % discounts safely ───────────────────────
 const GET_DISCOUNTS_QUERY = `
 query {
   automaticDiscountNodes(first: 50) {
     edges {
       node {
         automaticDiscount {
+          __typename
           ... on DiscountAutomaticBasic {
             title
             status
@@ -78,15 +79,19 @@ function parseDiscounts(data) {
   const map = {};
   for (const { node } of data.automaticDiscountNodes.edges) {
     const discount = node.automaticDiscount;
-    if (!discount || discount.status !== "ACTIVE") continue;
+
+    // Only handle DiscountAutomaticBasic
+    if (!discount || discount.__typename !== "DiscountAutomaticBasic") continue;
+    if (discount.status !== "ACTIVE") continue;
 
     const percentage = discount.customerGets?.value?.percentage;
-    if (!percentage) continue;
+    if (!percentage) continue; // skip fixed amount discounts
 
     const pct = Math.round(percentage * 100);
     const collections = discount.customerGets?.items?.collections?.edges ?? [];
 
     for (const { node: col } of collections) {
+      // Keep highest % if multiple discounts apply to same collection
       if (!map[col.id] || pct > map[col.id].pct) {
         map[col.id] = { pct, title: col.title };
       }
@@ -217,12 +222,14 @@ async function syncDiscounts() {
     await applyDiscountToCollection(colId, title, pct);
   }
 
+  // Clear old discounts
   const allDiscountData = await shopifyGraphQL(`
     query {
       automaticDiscountNodes(first: 50) {
         edges {
           node {
             automaticDiscount {
+              __typename
               customerGets {
                 items {
                   ... on DiscountCollections {
