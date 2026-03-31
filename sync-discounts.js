@@ -51,14 +51,14 @@ function sleep(ms) {
 }
 
 // ─── Retry wrapper (per variant) ─────────────────────────────
-async function retryVariantUpdate(productId, variantId, compareAtPrice, retries = 3) {
+async function retryVariantUpdate(variantId, compareAtPrice, retries = 3) {
   try {
-    return await updateVariantCompareAt(productId, variantId, compareAtPrice);
+    return await updateVariantCompareAt(variantId, compareAtPrice);
   } catch (err) {
     if (retries === 0) throw err;
     console.warn(`⚠️ Retry variant ${variantId}... (${retries} left)`);
     await sleep(1000 * (4 - retries));
-    return retryVariantUpdate(productId, variantId, compareAtPrice, retries - 1);
+    return retryVariantUpdate(variantId, compareAtPrice, retries - 1);
   }
 }
 
@@ -163,32 +163,41 @@ async function getCollectionProducts(collectionId) {
   return products;
 }
 
-// ─── Per-variant update using productVariantsBulkUpdate (one variant at a time)
-// productVariantUpdate was removed in API 2024-01; bulk mutation with a
-// single-element array gives identical per-variant isolation.
-const UPDATE_VARIANT_MUTATION = `
-mutation UpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-    productVariants { id compareAtPrice }
-    userErrors { field message }
+// ─── REST variant update ───────────────────────────────────────────
+// Uses REST PUT instead of GraphQL productVariantsBulkUpdate.
+// The GraphQL bulk mutation silently skips default variants on simple products;
+// the REST endpoint works identically for ALL product types.
+async function updateVariantCompareAt(variantId, compareAtPrice) {
+  const numericId = variantId.split('/').pop();
+  const res = await fetch(
+    `https://${SHOP}/admin/api/2024-01/variants/${numericId}.json`,
+    {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': TOKEN,
+      },
+      body: JSON.stringify({
+        variant: { id: parseInt(numericId, 10), compare_at_price: compareAtPrice }
+      })
+    }
+  );
+
+  // Handle REST rate limit
+  if (res.status === 429) {
+    const retryAfter = parseInt(res.headers.get('Retry-After') || '2', 10);
+    console.warn(`⏳ REST 429 – waiting ${retryAfter}s...`);
+    await sleep(retryAfter * 1000);
+    return updateVariantCompareAt(variantId, compareAtPrice);
   }
-}
-`;
 
-async function updateVariantCompareAt(productId, variantId, compareAtPrice) {
-  const data = await shopifyGraphQL(UPDATE_VARIANT_MUTATION, {
-    productId,
-    variants: [{ id: variantId, compareAtPrice }]
-  });
-
-  const errors = data.productVariantsBulkUpdate?.userErrors ?? [];
-  if (errors.length) {
-    console.error(`  ❌ variant ${variantId} userErrors:`, errors);
-    throw new Error(errors.map(e => e.message).join(", "));
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`REST ${res.status}: ${text}`);
   }
 
-  const v = data.productVariantsBulkUpdate?.productVariants?.[0];
-  console.log(`  ✔ variant ${v?.id} → compareAtPrice=${v?.compareAtPrice}`);
+  const json = await res.json();
+  console.log(`  ✔ variant ${variantId} → compare_at_price=${json.variant.compare_at_price}`);
   return true;
 }
 
@@ -207,7 +216,7 @@ async function applyDiscountToCollection(collectionId, collectionTitle, pct) {
       const compareAt = (price / (1 - pct / 100)).toFixed(2);
       console.log(`    variant ${variant.id}: price=${price} → compareAt=${compareAt}`);
       try {
-        await updateVariantCompareAt(product.id, variant.id, compareAt);
+        await updateVariantCompareAt(variant.id, compareAt);
       } catch (err) {
         console.error(`    Failed variant ${variant.id}:`, err.message);
       }
@@ -226,7 +235,7 @@ async function clearDiscountFromCollection(collectionId, collectionTitle) {
     for (const variant of product.variants) {
       if (!variant.compareAtPrice) continue;
       try {
-        await updateVariantCompareAt(product.id, variant.id, null);
+        await updateVariantCompareAt(variant.id, null);
       } catch (err) {
         console.error(`    Failed clearing variant ${variant.id}:`, err.message);
       }
