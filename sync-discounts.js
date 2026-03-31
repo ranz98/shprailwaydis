@@ -1,5 +1,28 @@
 require("dotenv").config();
 const fetch = require("node-fetch");
+const fs    = require("fs");
+
+const CACHE_FILE = "/tmp/shp_last_collections.json";
+
+// ─── Collection cache (persists across webhook calls + restarts) ──
+// Stores the last set of collections discount was applied to.
+// Needed so we know what to clear when a discount is deleted.
+function loadCollectionCache() {
+  try {
+    return new Map(Object.entries(JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"))));
+  } catch {
+    return new Map();
+  }
+}
+function saveCollectionCache(discountMap) {
+  try {
+    const obj = {};
+    for (const [id, { title }] of Object.entries(discountMap)) obj[id] = title;
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(obj));
+  } catch (e) {
+    console.warn("Could not save collection cache:", e.message);
+  }
+}
 
 const SHOP  = process.env.SHOP_DOMAIN;
 const TOKEN = process.env.ACCESS_TOKEN;
@@ -248,54 +271,31 @@ async function clearDiscountFromCollection(collectionId, collectionTitle) {
 async function syncDiscounts() {
   console.log("Syncing discounts...");
 
-  const data = await shopifyGraphQL(GET_DISCOUNTS_QUERY);
+  const data        = await shopifyGraphQL(GET_DISCOUNTS_QUERY);
   const discountMap = parseDiscounts(data);
 
+  // Load what we applied last time (survives server restarts via file cache)
+  const prevCollections = loadCollectionCache();
+
+  // 1️⃣  Apply current active discounts
   for (const [colId, { pct, title }] of Object.entries(discountMap)) {
     await applyDiscountToCollection(colId, title, pct);
   }
 
-  // Clear old discountsxxx
-  const allDiscountData = await shopifyGraphQL(`
-    query {
-      automaticDiscountNodes(first: 50) {
-        edges {
-          node {
-            automaticDiscount {
-              __typename
-              ... on DiscountAutomaticBasic {
-                customerGets {
-                  items {
-                    ... on DiscountCollections {
-                      collections(first: 50) {
-                        edges { node { id title } }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
+  // 2️⃣  Clear collections that previously had discounts but no longer do
+  //     Works even when ALL discounts are deleted (discountMap is empty)
+  for (const [colId, colTitle] of prevCollections) {
+    if (!discountMap[colId]) {
+      console.log(`Clearing removed discount from "${colTitle}"...`);
+      await clearDiscountFromCollection(colId, colTitle);
     }
-  `);
-
-  const allCollections = new Map();
-  for (const { node } of allDiscountData.automaticDiscountNodes.edges) {
-    // After the DiscountAutomaticBasic fragment fix, customerGets lives inside the typed object
-    const discount = node.automaticDiscount;
-    if (!discount || discount.__typename !== "DiscountAutomaticBasic") continue;
-    const collections = discount.customerGets?.items?.collections?.edges ?? [];
-    for (const { node: col } of collections) allCollections.set(col.id, col.title);
   }
 
-  for (const [colId, colTitle] of allCollections) {
-    if (!discountMap[colId]) await clearDiscountFromCollection(colId, colTitle);
-  }
+  // 3️⃣  Save current state for next run
+  saveCollectionCache(discountMap);
 
   console.log("Sync complete.");
   return discountMap;
 }
 
-module.exports = { syncDiscounts };
+module.exports = { syncDiscounts };
