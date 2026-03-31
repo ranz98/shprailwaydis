@@ -236,7 +236,11 @@ async function applyDiscountToCollection(collectionId, collectionTitle, pct) {
     console.log(`  Product: "${product.title}" (${product.variants.length} variant(s))`);
     for (const variant of product.variants) {
       const price = parseFloat(variant.price);
-      const compareAt = (price / (1 - pct / 100)).toFixed(2);
+      // Use Math.ceil to ensure the compareAtPrice is always rounded UP to the nearest cent.
+      // If we use regular rounding, the storefront's (compare - price)/compare math can give 
+      // 30.999% which some themes truncate to 30%. Ceiling guarantees it's always >= 31%.
+      const compareAtFloat = Math.ceil(price / (1 - pct / 100) * 100) / 100;
+      const compareAt = compareAtFloat.toFixed(2);
       console.log(`    variant ${variant.id}: price=${price} → compareAt=${compareAt}`);
       try {
         await updateVariantCompareAt(variant.id, compareAt);
