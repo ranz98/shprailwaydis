@@ -222,7 +222,7 @@ async function syncDiscounts() {
     await applyDiscountToCollection(colId, title, pct);
   }
 
-  // Clear old discounts
+  // Clear old discountsx
   const allDiscountData = await shopifyGraphQL(`
     query {
       automaticDiscountNodes(first: 50) {
