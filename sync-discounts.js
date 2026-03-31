@@ -230,11 +230,13 @@ async function syncDiscounts() {
           node {
             automaticDiscount {
               __typename
-              customerGets {
-                items {
-                  ... on DiscountCollections {
-                    collections(first: 50) {
-                      edges { node { id title } }
+              ... on DiscountAutomaticBasic {
+                customerGets {
+                  items {
+                    ... on DiscountCollections {
+                      collections(first: 50) {
+                        edges { node { id title } }
+                      }
                     }
                   }
                 }
