@@ -51,14 +51,14 @@ function sleep(ms) {
 }
 
 // ─── Retry wrapper (per variant) ─────────────────────────────
-async function retryVariantUpdate(variantId, compareAtPrice, retries = 3) {
+async function retryVariantUpdate(productId, variantId, compareAtPrice, retries = 3) {
   try {
-    return await updateVariantCompareAt(variantId, compareAtPrice);
+    return await updateVariantCompareAt(productId, variantId, compareAtPrice);
   } catch (err) {
     if (retries === 0) throw err;
     console.warn(`⚠️ Retry variant ${variantId}... (${retries} left)`);
     await sleep(1000 * (4 - retries));
-    return retryVariantUpdate(variantId, compareAtPrice, retries - 1);
+    return retryVariantUpdate(productId, variantId, compareAtPrice, retries - 1);
   }
 }
 
@@ -163,30 +163,31 @@ async function getCollectionProducts(collectionId) {
   return products;
 }
 
-// ─── Per-variant update mutation ─────────────────────────────
-// Using per-variant updates instead of productVariantsBulkUpdate because
-// Shopify can silently roll back a whole batch if any single variant fails.
+// ─── Per-variant update using productVariantsBulkUpdate (one variant at a time)
+// productVariantUpdate was removed in API 2024-01; bulk mutation with a
+// single-element array gives identical per-variant isolation.
 const UPDATE_VARIANT_MUTATION = `
-mutation UpdateVariant($input: ProductVariantInput!) {
-  productVariantUpdate(input: $input) {
-    productVariant { id compareAtPrice }
+mutation UpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+    productVariants { id compareAtPrice }
     userErrors { field message }
   }
 }
 `;
 
-async function updateVariantCompareAt(variantId, compareAtPrice) {
+async function updateVariantCompareAt(productId, variantId, compareAtPrice) {
   const data = await shopifyGraphQL(UPDATE_VARIANT_MUTATION, {
-    input: { id: variantId, compareAtPrice }
+    productId,
+    variants: [{ id: variantId, compareAtPrice }]
   });
 
-  const errors = data.productVariantUpdate?.userErrors ?? [];
+  const errors = data.productVariantsBulkUpdate?.userErrors ?? [];
   if (errors.length) {
     console.error(`  ❌ variant ${variantId} userErrors:`, errors);
     throw new Error(errors.map(e => e.message).join(", "));
   }
 
-  const v = data.productVariantUpdate?.productVariant;
+  const v = data.productVariantsBulkUpdate?.productVariants?.[0];
   console.log(`  ✔ variant ${v?.id} → compareAtPrice=${v?.compareAtPrice}`);
   return true;
 }
@@ -206,7 +207,7 @@ async function applyDiscountToCollection(collectionId, collectionTitle, pct) {
       const compareAt = (price / (1 - pct / 100)).toFixed(2);
       console.log(`    variant ${variant.id}: price=${price} → compareAt=${compareAt}`);
       try {
-        await updateVariantCompareAt(variant.id, compareAt);
+        await updateVariantCompareAt(product.id, variant.id, compareAt);
       } catch (err) {
         console.error(`    Failed variant ${variant.id}:`, err.message);
       }
@@ -225,7 +226,7 @@ async function clearDiscountFromCollection(collectionId, collectionTitle) {
     for (const variant of product.variants) {
       if (!variant.compareAtPrice) continue;
       try {
-        await updateVariantCompareAt(variant.id, null);
+        await updateVariantCompareAt(product.id, variant.id, null);
       } catch (err) {
         console.error(`    Failed clearing variant ${variant.id}:`, err.message);
       }
