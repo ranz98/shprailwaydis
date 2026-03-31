@@ -48,7 +48,7 @@ app.get("/sync", async (_req, res) => {
 });
 
 // ─── Health check ─────────────────────────────────────────────
-app.get("/", (_req, res) => res.json({ status: "ok", message: "Shopify Discount server runningx" }));
+app.get("/", (_req, res) => res.json({ status: "ok", message: "Shopify Discount server running updated" }));
 
 // ─── Run server ──────────────────────────────────────────────
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
