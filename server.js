@@ -32,7 +32,7 @@ app.post("/webhooks/discounts/update", verifyWebhook, async (req, res) => {
   res.sendStatus(200);
 });
 app.post("/webhooks/discounts/delete", verifyWebhook, async (req, res) => {
-  console.log("Webhook: discount deleted →", req.body?.id ?? "(no id)");
+  console.log("Webhook: discount deleted → full payload:", JSON.stringify(req.body));
   runSync("discount deleted");
   res.sendStatus(200);
 });
